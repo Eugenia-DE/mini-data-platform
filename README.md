@@ -18,3 +18,6 @@ Data Flow:
 Upload raw CSV files → Airflow processes and cleans data → results stored in PostgreSQL → Metabase visualizes insights.
 
 ### Architecture
+#### Mini Data Platform (ETL + Visualization)
+![Architecture Diagram](assets/images/mini-data-platform-architecture.png)
+
