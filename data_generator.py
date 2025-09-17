@@ -1,16 +1,42 @@
+import os
 import random
 import csv
 from datetime import datetime, timedelta
+import boto3
+from dotenv import load_dotenv
 
-#  Configurations
+# Load environment variables
+load_dotenv()
+
+MINIO_ENDPOINT = os.getenv("MINIO_ENDPOINT")
+MINIO_ACCESS_KEY = os.getenv("MINIO_ACCESS_KEY")
+MINIO_SECRET_KEY = os.getenv("MINIO_SECRET_KEY")
+MINIO_BUCKET = os.getenv("MINIO_BUCKET")
+
+# MinIO client
+s3 = boto3.client(
+    "s3",
+    endpoint_url=MINIO_ENDPOINT,
+    aws_access_key_id=MINIO_ACCESS_KEY,
+    aws_secret_access_key=MINIO_SECRET_KEY,
+)
+
+# Ensure bucket exists
+def ensure_bucket(bucket_name):
+    existing_buckets = [b["Name"] for b in s3.list_buckets().get("Buckets", [])]
+    if bucket_name not in existing_buckets:
+        s3.create_bucket(Bucket=bucket_name)
+        print(f"Created bucket: {bucket_name}")
+
+# Configurations
 ASSET_IDS = [f"Truck_{i}" for i in range(1, 11)]
 SHIPMENT_STATUSES = ["Delayed", "In Transit", "Delivered"]
 TRAFFIC_STATUSES = ["Detour", "Heavy", "Clear"]
 DELAY_REASONS = ["None", "Weather", "Traffic", "Mechanical Failure"]
 YEARS = [2023, 2024, 2025]
-ROWS_PER_YEAR = {2023: 1000, 2024: 1000, 2025: 600}  
+ROWS_PER_YEAR = {2023: 1000, 2024: 1000, 2025: 600}
 
-#  Random Value Generators
+# Random Value Generators
 def random_date(year):
     if year == 2025:
         start_date = datetime(2025, 1, 1)
@@ -37,7 +63,7 @@ def random_utilization(): return round(random.uniform(60, 100), 1)
 def random_demand_forecast(): return random.randint(100, 300)
 def random_logistics_delay(): return random.choice([0, 1])
 
-#  Row and File Generators
+# Row and File Generators
 def generate_row(year):
     return [
         random_date(year),
@@ -74,9 +100,19 @@ def generate_csv(year, num_rows, version=1):
         for _ in range(num_rows):
             writer.writerow(generate_row(year))
     print(f"Generated {filename} with {num_rows} rows.")
+    return filename
 
-#  Main Entry Point
+# Upload to MinIO
+def upload_to_minio(file_path, bucket, object_name=None):
+    if object_name is None:
+        object_name = os.path.basename(file_path)
+    s3.upload_file(file_path, bucket, object_name)
+    print(f"Uploaded {file_path} → {bucket}/{object_name}")
+
+# Main Entry Point
 if __name__ == "__main__":
-    version = 1 
+    ensure_bucket(MINIO_BUCKET)
+    version = 1
     for year in YEARS:
-        generate_csv(2023, ROWS_PER_YEAR[2023], version=version)
+        filename = generate_csv(2023, ROWS_PER_YEAR[2023], version=version)
+        upload_to_minio(filename, MINIO_BUCKET)
