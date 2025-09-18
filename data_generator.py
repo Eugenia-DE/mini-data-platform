@@ -33,23 +33,13 @@ ASSET_IDS = [f"Truck_{i}" for i in range(1, 11)]
 SHIPMENT_STATUSES = ["Delayed", "In Transit", "Delivered"]
 TRAFFIC_STATUSES = ["Detour", "Heavy", "Clear"]
 DELAY_REASONS = ["None", "Weather", "Traffic", "Mechanical Failure"]
-YEARS = [2023, 2024, 2025]
-ROWS_PER_YEAR = {2023: 1000, 2024: 1000, 2025: 600}
 
 # Random Value Generators
-def random_date(year):
-    if year == 2025:
-        start_date = datetime(2025, 1, 1)
-        end_date = datetime(2025, 9, 16)
-    else:
-        start_date = datetime(year, 1, 1)
-        end_date = datetime(year, 12, 31)
-    
+def random_date(start_date, end_date):
     delta = end_date - start_date
     random_days = random.randint(0, delta.days)
-    random_date = start_date + timedelta(days=random_days)
-    random_time = random.randint(0, 86399)  # Seconds in a day
-    return (random_date + timedelta(seconds=random_time)).strftime("%Y-%m-%d %H:%M:%S")
+    random_time = random.randint(0, 86399)  # seconds in day
+    return (start_date + timedelta(days=random_days, seconds=random_time)).strftime("%Y-%m-%d %H:%M:%S")
 
 def random_lat(): return round(random.uniform(-90, 90), 4)
 def random_lon(): return round(random.uniform(-180, 180), 4)
@@ -64,9 +54,9 @@ def random_demand_forecast(): return random.randint(100, 300)
 def random_logistics_delay(): return random.choice([0, 1])
 
 # Row and File Generators
-def generate_row(year):
+def generate_row(start_date, end_date):
     return [
-        random_date(year),
+        random_date(start_date, end_date),
         random.choice(ASSET_IDS),
         random_lat(),
         random_lon(),
@@ -84,9 +74,8 @@ def generate_row(year):
         random_logistics_delay()
     ]
 
-def generate_csv(year, num_rows, version=1):
-    filename = f"smart_logistics_{year}_v{version}.csv"
-    with open(filename, 'w', newline='') as file:
+def generate_csv(file_path, num_rows, start_date, end_date):
+    with open(file_path, 'w', newline='') as file:
         writer = csv.writer(file)
         # Header
         writer.writerow([
@@ -96,23 +85,56 @@ def generate_csv(year, num_rows, version=1):
             "Logistics_Delay_Reason", "Asset_Utilization", "Demand_Forecast",
             "Logistics_Delay"
         ])
-        
         for _ in range(num_rows):
-            writer.writerow(generate_row(year))
-    print(f"Generated {filename} with {num_rows} rows.")
-    return filename
+            writer.writerow(generate_row(start_date, end_date))
+    print(f"Generated {file_path} with {num_rows} rows.")
+    return file_path
 
-# Upload to MinIO
+# Upload
 def upload_to_minio(file_path, bucket, object_name=None):
     if object_name is None:
         object_name = os.path.basename(file_path)
     s3.upload_file(file_path, bucket, object_name)
     print(f"Uploaded {file_path} → {bucket}/{object_name}")
 
-# Main Entry Point
+# Modes
+def generate_backfill_2025(rows_per_month=1000):
+    """Generate monthly files for 2025 YTD only."""
+    year = 2025
+    current_year = datetime.now().year
+    current_month = datetime.now().month if year == current_year else 12
+
+    for month in range(1, current_month + 1):
+        start_date = datetime(year, month, 1)
+
+        if month == 12:
+            end_date = datetime(year, 12, 31, 23, 59, 59)
+        else:
+            end_date = datetime(year, month + 1, 1) - timedelta(seconds=1)
+
+        filename = f"smart_logistics_{year}_{month:02d}.csv"
+        generate_csv(filename, rows_per_month, start_date, end_date)
+        upload_to_minio(filename, MINIO_BUCKET, f"backfill/{year}/{filename}")
+
+def generate_incremental(rows_per_day=200):
+    """Generate file for 'today' as incremental daily drop."""
+    today = datetime.now().date()
+    start_date = datetime(today.year, today.month, today.day)
+    end_date = start_date + timedelta(hours=23, minutes=59, seconds=59)
+
+    filename = f"smart_logistics_{today}.csv"
+    generate_csv(filename, rows_per_day, start_date, end_date)
+    upload_to_minio(filename, MINIO_BUCKET, f"incremental/{today.year}/{filename}")
+
+# Main
 if __name__ == "__main__":
     ensure_bucket(MINIO_BUCKET)
-    version = 1
-    for year in YEARS:
-        filename = generate_csv(2023, ROWS_PER_YEAR[2023], version=version)
-        upload_to_minio(filename, MINIO_BUCKET)
+
+    mode = os.getenv("DATA_MODE", "backfill")  # backfill or incremental
+
+    if mode == "backfill":
+        generate_backfill_2025(rows_per_month=1000)
+    elif mode == "incremental":
+        generate_incremental(rows_per_day=200)
+    else:
+        print("Unknown mode. Use DATA_MODE=backfill or incremental.")
