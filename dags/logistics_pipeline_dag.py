@@ -3,18 +3,23 @@ import pandas as pd
 import boto3
 import tempfile
 from airflow import DAG
-from airflow.providers.amazon.aws.sensors.s3 import S3KeySensor
 from airflow.operators.python import PythonOperator
+from airflow.providers.amazon.aws.sensors.s3 import S3KeySensor
 from airflow.providers.postgres.hooks.postgres import PostgresHook
 from airflow.hooks.base import BaseHook
+from airflow.models import Variable
 from datetime import datetime, timedelta
 
 # Configurations
 MINIO_BUCKET = "logistics-data"
-PREFIX = "smart_logistics_"
+BACKFILL_PREFIX = "backfill/"
+INCREMENTAL_PREFIX = "incremental/"
 AWS_CONN_ID = "minio_conn"
 POSTGRES_CONN_ID = "postgres_conn"
 
+# Get DATA_YEAR dynamically to avoid parsing-time issues
+def get_data_year():
+    return Variable.get("DATA_YEAR", default_var=str(datetime.now().year))
 
 default_args = {
     "owner": "airflow",
@@ -25,102 +30,180 @@ default_args = {
     "retry_delay": timedelta(minutes=2),
 }
 
-def download_from_minio(**context):
-    """Download the latest file from MinIO to local tmp dir."""
+# Utility Functions
+def get_s3_client():
     conn = BaseHook.get_connection(AWS_CONN_ID)
-    s3 = boto3.client(
+    return boto3.client(
         "s3",
         endpoint_url=conn.extra_dejson.get("endpoint_url"),
         aws_access_key_id=conn.login,
         aws_secret_access_key=conn.password,
     )
 
-    # List objects with prefix
-    response = s3.list_objects_v2(Bucket=MINIO_BUCKET, Prefix=PREFIX)
+def list_files_in_prefix(prefix: str, year: str = None, **context):
+    """List all files under a given prefix (optionally filtered by year)."""
+    s3 = get_s3_client()
+    target_prefix = f"{prefix}{year}/" if year else prefix
+    response = s3.list_objects_v2(Bucket=MINIO_BUCKET, Prefix=target_prefix)
+
     if "Contents" not in response:
-        raise ValueError("No matching file found in MinIO bucket.")
+        raise ValueError(f"No files found under {target_prefix}")
 
-    # Pick the latest file
-    latest_file = max(response["Contents"], key=lambda x: x["LastModified"])["Key"]
+    file_keys = [obj["Key"] for obj in response["Contents"]]
+    context["ti"].xcom_push(key="file_keys", value=file_keys)
+    print(f"Found files: {file_keys}")
 
-    # Download locally
-    tmp_dir = tempfile.gettempdir()
-    local_path = os.path.join(tmp_dir, os.path.basename(latest_file))
-    s3.download_file(MINIO_BUCKET, latest_file, local_path)
+def validate_data(df: pd.DataFrame) -> pd.DataFrame:
+    # Required schema for logistics dataset
+    required_cols = [
+        "Timestamp", "Asset_ID", "Latitude", "Longitude", "Inventory_Level",
+        "Shipment_Status", "Temperature", "Humidity", "Traffic_Status",
+        "Waiting_Time", "User_Transaction_Amount", "User_Purchase_Frequency",
+        "Logistics_Delay_Reason", "Asset_Utilization", "Demand_Forecast",
+        "Logistics_Delay"
+    ]
 
-    # Push path to XCom
-    context["ti"].xcom_push(key="local_file", value=local_path)
-    print(f"Downloaded {latest_file} to {local_path}")
+    for col in required_cols:
+        if col not in df.columns:
+            raise ValueError(f"Missing required column: {col}")
 
-def transform_data(**context):
-    """Transform CSV data with pandas."""
-    local_path = context["ti"].xcom_pull(key="local_file", task_ids="download_from_minio")
-    df = pd.read_csv(local_path)
+    # Business rules
+    if not df["Asset_Utilization"].between(0, 100).all():
+        raise ValueError("Asset_Utilization must be between 0 and 100.")
 
-    # Example transformations
-    df = df.dropna()
-    df.columns = [c.strip().lower() for c in df.columns]
+    if (df["Inventory_Level"] < 0).any():
+        raise ValueError("Inventory_Level cannot be negative.")
 
-    # Save transformed file
-    transformed_path = local_path.replace(".csv", "_clean.csv")
-    df.to_csv(transformed_path, index=False)
+    if (df["User_Transaction_Amount"] < 0).any():
+        raise ValueError("User_Transaction_Amount cannot be negative.")
 
-    context["ti"].xcom_push(key="transformed_file", value=transformed_path)
-    print(f"Transformed file saved at {transformed_path}")
+    if (df["User_Purchase_Frequency"] < 0).any():
+        raise ValueError("User_Purchase_Frequency cannot be negative.")
+
+    # Drop rows with nulls in critical columns
+    df = df.dropna(subset=["Timestamp", "Asset_ID", "Asset_Utilization"])
+
+    return df
+
+
+def download_and_process(**context):
+    s3 = get_s3_client()
+    file_keys = context["ti"].xcom_pull(key="file_keys", task_ids=context["params"]["list_task"])
+
+    transformed_files = []
+    for key in file_keys:
+        tmp_dir = tempfile.gettempdir()
+        local_path = os.path.join(tmp_dir, os.path.basename(key))
+        s3.download_file(MINIO_BUCKET, key, local_path)
+
+        if key.endswith(".csv"):
+            df = pd.read_csv(local_path)
+        elif key.endswith(".json"):
+            df = pd.read_json(local_path, lines=True)
+        elif key.endswith(".parquet"):
+            df = pd.read_parquet(local_path)
+        else:
+            raise ValueError(f"Unsupported file format: {key}")
+
+        df = validate_data(df)
+        df.columns = [c.strip().lower() for c in df.columns]
+
+        clean_path = local_path.rsplit(".", 1)[0] + "_clean.parquet"
+        df.to_parquet(clean_path, index=False)
+        transformed_files.append(clean_path)
+
+        print(f"Processed + saved {clean_path}")
+
+    context["ti"].xcom_push(key="transformed_files", value=transformed_files)
 
 def load_to_postgres(**context):
-    """Load transformed CSV into PostgreSQL table."""
-    transformed_path = context["ti"].xcom_pull(key="transformed_file", task_ids="transform_data")
-    df = pd.read_csv(transformed_path)
-
+    transformed_files = context["ti"].xcom_pull(
+        key="transformed_files", task_ids=context["params"]["process_task"]
+    )
     pg_hook = PostgresHook(postgres_conn_id=POSTGRES_CONN_ID)
     engine = pg_hook.get_sqlalchemy_engine()
 
-    df.to_sql("logistics_data", engine, if_exists="replace", index=False)
-    print("Data loaded into PostgreSQL table 'logistics_data'")
+    for file in transformed_files:
+        df = pd.read_parquet(file)
+        df.to_sql("logistics_data", engine, if_exists="append", index=False)
+        print(f"Loaded {file} into PostgreSQL table 'logistics_data'")
 
-# DAG Definition
-dag = DAG(
-    dag_id="logistics_etl_pipeline",
+# Backfill DAG (param-driven)
+with DAG(
+    dag_id="logistics_backfill_pipeline",
     default_args=default_args,
-    description="ETL pipeline: MinIO to Transform to PostgreSQL",
-    schedule_interval="@hourly",
-    start_date=datetime(2023, 1, 1),
+    description="ETL pipeline for backfill data from MinIO to PostgreSQL",
+    schedule_interval=None,  # run manually
+    start_date=datetime(2024, 1, 1),
     catchup=False,
-    tags=["logistics", "minio", "postgres", "etl"],
-)
+    tags=["logistics", "minio", "postgres", "etl", "backfill"],
+) as backfill_dag:
 
-wait_for_file = S3KeySensor(
-    task_id="wait_for_file",
-    bucket_name=MINIO_BUCKET,
-    bucket_key="smart_logistics_*",
-    aws_conn_id=AWS_CONN_ID,
-    wildcard_match=True,
-    poke_interval=30,
-    timeout=60 * 60,
-    mode="poke",
-    dag=dag,
-)
+    list_backfill_files = PythonOperator(
+        task_id="list_backfill_files",
+        python_callable=list_files_in_prefix,
+        op_kwargs={"prefix": BACKFILL_PREFIX, "year": get_data_year()},
+        dag=backfill_dag,
+    )
 
-download_task = PythonOperator(
-    task_id="download_from_minio",
-    python_callable=download_from_minio,
-    dag=dag,
-)
+    download_backfill = PythonOperator(
+        task_id="download_and_process_backfill",
+        python_callable=download_and_process,
+        params={"list_task": "list_backfill_files", "process_task": "download_and_process_backfill"},
+        dag=backfill_dag,
+    )
 
-transform_task = PythonOperator(
-    task_id="transform_data",
-    python_callable=transform_data,
-    dag=dag,
-)
+    load_backfill = PythonOperator(
+        task_id="load_to_postgres_backfill",
+        python_callable=load_to_postgres,
+        params={"process_task": "download_and_process_backfill"},
+        dag=backfill_dag,
+    )
 
-load_task = PythonOperator(
-    task_id="load_to_postgres",
-    python_callable=load_to_postgres,
-    dag=dag,
-)
+    list_backfill_files >> download_backfill >> load_backfill
 
-# Set dependencies using set_downstream to avoid Unicode issues
-wait_for_file.set_downstream(download_task)
-download_task.set_downstream(transform_task)
-transform_task.set_downstream(load_task)
+# Incremental DAG (auto-current)
+with DAG(
+    dag_id="logistics_incremental_pipeline",
+    default_args=default_args,
+    description="ETL pipeline for daily incremental data",
+    schedule_interval="@daily",
+    start_date=datetime(2025, 1, 1),
+    catchup=False,
+    tags=["logistics", "minio", "postgres", "etl", "incremental"],
+) as incremental_dag:
+
+    wait_for_incremental_file = S3KeySensor(
+        task_id="wait_for_file",
+        bucket_name=MINIO_BUCKET,
+        bucket_key=lambda: INCREMENTAL_PREFIX + f"{get_data_year()}/*",  # Dynamic bucket_key
+        aws_conn_id=AWS_CONN_ID,
+        wildcard_match=True,
+        poke_interval=60,
+        timeout=60 * 30,
+        mode="poke",
+        dag=incremental_dag,
+    )
+
+    list_incremental_files = PythonOperator(
+        task_id="list_incremental_files",
+        python_callable=list_files_in_prefix,
+        op_kwargs={"prefix": INCREMENTAL_PREFIX, "year": get_data_year()},
+        dag=incremental_dag,
+    )
+
+    download_incremental = PythonOperator(
+        task_id="download_and_process_incremental",
+        python_callable=download_and_process,
+        params={"list_task": "list_incremental_files", "process_task": "download_and_process_incremental"},
+        dag=incremental_dag,
+    )
+
+    load_incremental = PythonOperator(
+        task_id="load_to_postgres_incremental",
+        python_callable=load_to_postgres,
+        params={"process_task": "download_and_process_incremental"},
+        dag=incremental_dag,
+    )
+
+    wait_for_incremental_file >> list_incremental_files >> download_incremental >> load_incremental
