@@ -1,5 +1,3 @@
-version: "3.9"
-
 services:
   postgres:
     image: postgres:15
@@ -45,7 +43,7 @@ services:
       start_period: 10s
 
   airflow-webserver:
-    image: apache/airflow:2.7.3  # Use standard image for now; custom if needed later
+    image: apache/airflow:2.7.3  
     container_name: airflow-webserver
     restart: always
     depends_on:
@@ -59,7 +57,7 @@ services:
       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
       AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY}
       AIRFLOW__WEBSERVER__SECRET_KEY: ${AIRFLOW_SECRET_KEY}
-      AIRFLOW__WEBSERVER__SESSION_BACKEND: securecookie  # Switch to securecookie to fix datetime issue
+      AIRFLOW__WEBSERVER__SESSION_BACKEND: securecookie  
       AIRFLOW__WEBSERVER__RATELIMIT_STORAGE_URI: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
       TZ: UTC
     command: bash -c "
@@ -89,7 +87,7 @@ services:
       start_period: 30s
 
   airflow-scheduler:
-    image: apache/airflow:2.7.3  # Use standard image for now; custom if needed later
+    image: apache/airflow:2.7.3 
     container_name: airflow-scheduler
     restart: always
     depends_on:
