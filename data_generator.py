@@ -1,6 +1,7 @@
 import os
 import random
 import csv
+import argparse
 from datetime import datetime, timedelta
 import boto3
 from dotenv import load_dotenv
@@ -12,6 +13,8 @@ MINIO_ENDPOINT = os.getenv("MINIO_ENDPOINT")
 MINIO_ACCESS_KEY = os.getenv("MINIO_ACCESS_KEY")
 MINIO_SECRET_KEY = os.getenv("MINIO_SECRET_KEY")
 MINIO_BUCKET = os.getenv("MINIO_BUCKET")
+ROWS_PER_DAY = int(os.getenv("DATA_ROWS_PER_DAY", 500))
+PARTS_PER_DAY = int(os.getenv("DATA_PARTS_PER_DAY", 3))  # default = 3 parts/day
 
 # MinIO client
 s3 = boto3.client(
@@ -21,7 +24,6 @@ s3 = boto3.client(
     aws_secret_access_key=MINIO_SECRET_KEY,
 )
 
-# Ensure bucket exists
 def ensure_bucket(bucket_name):
     existing_buckets = [b["Name"] for b in s3.list_buckets().get("Buckets", [])]
     if bucket_name not in existing_buckets:
@@ -31,110 +33,117 @@ def ensure_bucket(bucket_name):
 # Configurations
 ASSET_IDS = [f"Truck_{i}" for i in range(1, 11)]
 SHIPMENT_STATUSES = ["Delayed", "In Transit", "Delivered"]
-TRAFFIC_STATUSES = ["Detour", "Heavy", "Clear"]
-DELAY_REASONS = ["None", "Weather", "Traffic", "Mechanical Failure"]
+TRAFFIC_STATUSES = ["Clear", "Heavy", "Accident Detour"]
+WEATHER_EVENTS = ["Normal", "Storm", "Extreme Heat"]
+STATES = [
+    "California", "Texas", "Florida", "New York", "Illinois",
+    "Pennsylvania", "Ohio", "Georgia", "North Carolina", "Michigan"
+]
 
-# Random Value Generators
 def random_date(start_date, end_date):
     delta = end_date - start_date
-    random_days = random.randint(0, delta.days)
-    random_time = random.randint(0, 86399)  # seconds in day
-    return (start_date + timedelta(days=random_days, seconds=random_time)).strftime("%Y-%m-%d %H:%M:%S")
+    random_seconds = random.randint(0, int(delta.total_seconds()))
+    return (start_date + timedelta(seconds=random_seconds)).strftime("%Y-%m-%d %H:%M:%S")
 
-def random_lat(): return round(random.uniform(-90, 90), 4)
-def random_lon(): return round(random.uniform(-180, 180), 4)
-def random_inventory(): return random.randint(100, 500)
-def random_temp(): return round(random.uniform(18, 30), 1)
-def random_humidity(): return round(random.uniform(50, 80), 1)
-def random_waiting_time(): return random.randint(10, 60)
-def random_transaction_amount(): return random.randint(100, 500)
-def random_purchase_freq(): return random.randint(1, 10)
-def random_utilization(): return round(random.uniform(60, 100), 1)
-def random_demand_forecast(): return random.randint(100, 300)
-def random_logistics_delay(): return random.choice([0, 1])
-
-# Row and File Generators
 def generate_row(start_date, end_date):
+    ts = random_date(start_date, end_date)
+    asset = random.choice(ASSET_IDS)
+    state = random.choice(STATES)
+    distance = round(random.uniform(20, 500), 1)
+
+    traffic = random.choices(TRAFFIC_STATUSES, weights=[0.6, 0.3, 0.1])[0]
+    weather = random.choices(WEATHER_EVENTS, weights=[0.7, 0.2, 0.1])[0]
+
+    planned_hours = max(1, round(distance / random.uniform(40, 60)))
+    actual_hours = planned_hours
+
+    delay_flag = 0
+    base_chance = 0.05
+    if distance > 200: base_chance += 0.15
+    if traffic != "Clear": base_chance += 0.25
+    if weather != "Normal": base_chance += 0.3
+
+    if random.random() < base_chance:
+        delay_flag = 1
+        actual_hours += random.randint(1, 4)
+
+    if delay_flag:
+        if traffic != "Clear":
+            reason = "Traffic"
+        elif weather != "Normal":
+            reason = "Weather"
+        else:
+            reason = random.choice(["Mechanical Failure", "Other"])
+    else:
+        reason = "None"
+
     return [
-        random_date(start_date, end_date),
-        random.choice(ASSET_IDS),
-        random_lat(),
-        random_lon(),
-        random_inventory(),
+        ts,
+        asset,
+        state,
+        distance,
         random.choice(SHIPMENT_STATUSES),
-        random_temp(),
-        random_humidity(),
-        random.choice(TRAFFIC_STATUSES),
-        random_waiting_time(),
-        random_transaction_amount(),
-        random_purchase_freq(),
-        random.choice(DELAY_REASONS),
-        random_utilization(),
-        random_demand_forecast(),
-        random_logistics_delay()
+        planned_hours,
+        actual_hours,
+        delay_flag,
+        reason,
+        traffic,
+        weather,
+        round(random.uniform(20, 35), 1),
+        round(random.uniform(50, 80), 1),
+        round(random.uniform(60, 95), 1),
+        random.randint(100, 500),
+        random.randint(200, 350)
     ]
 
 def generate_csv(file_path, num_rows, start_date, end_date):
-    with open(file_path, 'w', newline='') as file:
+    with open(file_path, "w", newline="") as file:
         writer = csv.writer(file)
-        # Header
         writer.writerow([
-            "Timestamp", "Asset_ID", "Latitude", "Longitude", "Inventory_Level",
-            "Shipment_Status", "Temperature", "Humidity", "Traffic_Status",
-            "Waiting_Time", "User_Transaction_Amount", "User_Purchase_Frequency",
-            "Logistics_Delay_Reason", "Asset_Utilization", "Demand_Forecast",
-            "Logistics_Delay"
+            "Timestamp", "Asset_ID", "State", "Route_Distance_km",
+            "Shipment_Status", "Planned_Delivery_Hours", "Actual_Delivery_Hours",
+            "Delay_Flag", "Delay_Reason", "Traffic_Status", "Weather_Event",
+            "Temperature", "Humidity", "Asset_Utilization", "Inventory_Level",
+            "Demand_Forecast"
         ])
         for _ in range(num_rows):
             writer.writerow(generate_row(start_date, end_date))
     print(f"Generated {file_path} with {num_rows} rows.")
     return file_path
 
-# Upload
-def upload_to_minio(file_path, bucket, object_name=None):
-    if object_name is None:
-        object_name = os.path.basename(file_path)
+def upload_to_minio(file_path, bucket, object_name):
     s3.upload_file(file_path, bucket, object_name)
     print(f"Uploaded {file_path} → {bucket}/{object_name}")
 
-# Modes
-def generate_backfill_2025(rows_per_month=1000):
-    """Generate monthly files for 2025 YTD only."""
-    year = 2025
-    current_year = datetime.now().year
-    current_month = datetime.now().month if year == current_year else 12
+def generate_partial_batches(date_str=None, rows=ROWS_PER_DAY, parts=PARTS_PER_DAY, part=None):
+    if date_str:
+        target_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+    else:
+        target_date = datetime.now().date()
 
-    for month in range(1, current_month + 1):
-        start_date = datetime(year, month, 1)
-
-        if month == 12:
-            end_date = datetime(year, 12, 31, 23, 59, 59)
-        else:
-            end_date = datetime(year, month + 1, 1) - timedelta(seconds=1)
-
-        filename = f"smart_logistics_{year}_{month:02d}.csv"
-        generate_csv(filename, rows_per_month, start_date, end_date)
-        upload_to_minio(filename, MINIO_BUCKET, f"backfill/{year}/{filename}")
-
-def generate_incremental(rows_per_day=200):
-    """Generate file for 'today' as incremental daily drop."""
-    today = datetime.now().date()
-    start_date = datetime(today.year, today.month, today.day)
+    start_date = datetime(target_date.year, target_date.month, target_date.day)
     end_date = start_date + timedelta(hours=23, minutes=59, seconds=59)
 
-    filename = f"smart_logistics_{today}.csv"
-    generate_csv(filename, rows_per_day, start_date, end_date)
-    upload_to_minio(filename, MINIO_BUCKET, f"incremental/{today.year}/{filename}")
+    rows_per_part = rows // parts
+    hours_per_part = 24 // parts
 
-# Main
+    selected_parts = [part] if part else range(1, parts + 1)
+
+    for p in selected_parts:
+        part_start = start_date + timedelta(hours=(p - 1) * hours_per_part)
+        part_end = part_start + timedelta(hours=hours_per_part - 1, minutes=59, seconds=59)
+
+        filename = f"smart_logistics_{target_date}_part{p}.csv"
+        local_path = generate_csv(filename, rows_per_part, part_start, part_end)
+
+        object_name = f"batch/{target_date.year}/{target_date.strftime('%Y-%m-%d')}/{filename}"
+        upload_to_minio(local_path, MINIO_BUCKET, object_name)
+
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Generate partial logistics data")
+    parser.add_argument("--date", help="Target date (YYYY-MM-DD)", required=False)
+    parser.add_argument("--part", type=int, help="Generate only this part (e.g., --part 2)", required=False)
+    args = parser.parse_args()
+
     ensure_bucket(MINIO_BUCKET)
-
-    mode = os.getenv("DATA_MODE", "backfill")  # backfill or incremental
-
-    if mode == "backfill":
-        generate_backfill_2025(rows_per_month=1000)
-    elif mode == "incremental":
-        generate_incremental(rows_per_day=200)
-    else:
-        print("Unknown mode. Use DATA_MODE=backfill or incremental.")
+    generate_partial_batches(date_str=args.date, part=args.part)
