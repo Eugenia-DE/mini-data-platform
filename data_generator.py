@@ -46,6 +46,7 @@ def random_date(start_date, end_date):
     return (start_date + timedelta(seconds=random_seconds)).strftime("%Y-%m-%d %H:%M:%S")
 
 def generate_row(start_date, end_date):
+    # Random basic attributes
     ts = random_date(start_date, end_date)
     asset = random.choice(ASSET_IDS)
     state = random.choice(STATES)
@@ -57,6 +58,7 @@ def generate_row(start_date, end_date):
     planned_hours = max(1, round(distance / random.uniform(40, 60)))
     actual_hours = planned_hours
 
+    # Delay probability
     delay_flag = 0
     base_chance = 0.05
     if distance > 200: base_chance += 0.15
@@ -67,6 +69,7 @@ def generate_row(start_date, end_date):
         delay_flag = 1
         actual_hours += random.randint(1, 4)
 
+    # Reason for delay
     if delay_flag:
         if traffic != "Clear":
             reason = "Traffic"
@@ -97,6 +100,9 @@ def generate_row(start_date, end_date):
     ]
 
 def generate_csv(file_path, num_rows, start_date, end_date):
+    """
+    Generate a CSV file with synthetic logistics data.
+    """
     with open(file_path, "w", newline="") as file:
         writer = csv.writer(file)
         writer.writerow([
@@ -112,6 +118,9 @@ def generate_csv(file_path, num_rows, start_date, end_date):
     return file_path
 
 def upload_to_minio(file_path, bucket, object_name):
+    """
+    Upload generated CSV file to MinIO bucket.
+    """
     s3.upload_file(file_path, bucket, object_name)
     print(f"Uploaded {file_path} → {bucket}/{object_name}")
 
@@ -133,9 +142,11 @@ def generate_partial_batches(date_str=None, rows=ROWS_PER_DAY, parts=PARTS_PER_D
         part_start = start_date + timedelta(hours=(p - 1) * hours_per_part)
         part_end = part_start + timedelta(hours=hours_per_part - 1, minutes=59, seconds=59)
 
+        # File naming
         filename = f"smart_logistics_{target_date}_part{p}.csv"
         local_path = generate_csv(filename, rows_per_part, part_start, part_end)
 
+        # Object storage path
         object_name = f"batch/{target_date.year}/{target_date.strftime('%Y-%m-%d')}/{filename}"
         upload_to_minio(local_path, MINIO_BUCKET, object_name)
 
