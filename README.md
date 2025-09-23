@@ -6,6 +6,34 @@ End-to-End ETL Pipeline with Docker for Logistics and Supply Chain Analytics
 
 This project is a lightweight end-to-end ETL data platform for logistics and supply chain analytics, built entirely with Docker Compose. It demonstrates how teams can collect, process, store, and visualize data to directly drive business value.
 
+## Smart Logistics: Business Use Case & Solution
+### Business Context
+Smart Logistics is a mid-sized logistics and supply chain company operating across multiple U.S. states. Their operations involve daily truck shipments, route planning, and asset management. However, they face challenges with:
+
+- **Operational inefficiency** → Underutilized trucks and unpredictable delays.
+
+- **Delivery reliability** → Late shipments caused by traffic, weather, or mechanical issues.
+
+- **Geographic blind spots** → Lack of visibility into which states/routes contribute most to delays.
+
+### User Stories
+
+Logistics coordinator, wants to track delivery delays and their root causes so they can fix systemic problems.
+
+Regional manager, wants to understand which states have the worst performance so they can allocate resources better.
+
+### Solution Built
+
+To address these needs, a mini data platform was developed that integrates:
+
+- Data generation & ingestion → Simulated logistics data batches loaded daily into PostgreSQL via Airflow DAGs.
+
+- Data validation & transformation → Cleaning, deduplication, and KPI computation for reliable downstream analytics.
+
+- Business intelligence (BI) → Metabase dashboards and reports delivering actionable insights on delay trends, route performance, and customer impact.
+
+This end-to-end pipeline empowers Smart Logistics with visibility, and data-driven decision making.
+
 ## Architecture
 
 The Mini Data Platform integrates four core open-source components:
@@ -110,6 +138,7 @@ python generator.py --date 2025-09-18 --part 2
 2. Log in using the credentials from your `.env` file
 3. Navigate to **Buckets** in the left sidebar
 4. Click on your bucket name to view the generated CSV files
+
 ![MinIO Logistics Bucket](assets/images/MinIO_data_bucket.png)
 
 ### Step 4: Deploy DAG to Airflow
