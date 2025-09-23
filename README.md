@@ -110,6 +110,7 @@ python generator.py --date 2025-09-18 --part 2
 2. Log in using the credentials from your `.env` file
 3. Navigate to **Buckets** in the left sidebar
 4. Click on your bucket name to view the generated CSV files
+![MinIO Logistics Bucket](assets/images/MinIO_data_bucket.png)
 
 ### Step 4: Deploy DAG to Airflow
 
@@ -170,6 +171,10 @@ The analysis highlights traffic-related issues as the single largest driver of d
 ![Impact of External Factors (Weather/Traffic) on Delays](assets/images/logistics_external_factors_weather_traffic.png)
 
 Even under normal weather conditions, heavy traffic remains the largest external factor impacting delivery reliability. During adverse events like storms, delays spike across all categories, showing that contingency planning is essential. Extreme heat, though less common, introduces unique risks that could increase with climate trends.
+
+### Smart Logistics Dashboard
+
+![Smart Logistics Dashboard](assets/images/smart_logistics_dashboard.png)
 
 ## Troubleshooting
 
