@@ -105,6 +105,7 @@ def generate_csv(file_path, num_rows, start_date, end_date):
     """
     with open(file_path, "w", newline="") as file:
         writer = csv.writer(file)
+        # Write headers
         writer.writerow([
             "Timestamp", "Asset_ID", "State", "Route_Distance_km",
             "Shipment_Status", "Planned_Delivery_Hours", "Actual_Delivery_Hours",
@@ -136,6 +137,7 @@ def generate_partial_batches(date_str=None, rows=ROWS_PER_DAY, parts=PARTS_PER_D
     rows_per_part = rows // parts
     hours_per_part = 24 // parts
 
+    # If specific part requested, only generate that one
     selected_parts = [part] if part else range(1, parts + 1)
 
     for p in selected_parts:
